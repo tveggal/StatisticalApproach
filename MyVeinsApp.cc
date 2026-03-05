@@ -21,20 +21,24 @@
 //
 
 #include "MyVeinsApp.h"
-#include <cmath>
+using namespace veins;
 
-Define_Module(MyVeinsApp);
+Define_Module(veins::MyVeinsApp);
+
+std::ofstream veins::MyVeinsApp::logFile;
+bool veins::MyVeinsApp::isWritten = false;
 
 void MyVeinsApp::initialize(int stage)
 {
     DemoBaseApplLayer::initialize(stage);
 
-    if (stage == 0) {
-        // Attack assignment
-        isAttacker = uniform(0, 1) < 0.10;        // 10% vehicles are attackers
-        attackType = intuniform(1,5);             // pick attack type randomly
+    if (stage == 0)
+    {
+        isAttacker = uniform(0, 1) < 0.10;
+        attackType = intuniform(1,5);
+        mobility = TraCIMobilityAccess().get(getParentModule());
 
-        falseOffset = par("falseOffset").doubleValue();
+        falseOffset = 500;
 
         predictionInterval = 0.3;      // 300 ms
         positionThreshold = 5.0;       // meters
@@ -42,8 +46,16 @@ void MyVeinsApp::initialize(int stage)
         speedOfLight = 3e8;            // m/s
 
         // open CSV for logging
-        logFile.open("bsm_features.csv");
-        logFile << "senderId,distance_sr,predicted_error,propagation_error,detectedMalicious\n";
+        if (!logFile.is_open()) {
+            logFile.open("bsm_features.csv", std::ios::app);
+        }
+        if (!isWritten) {
+            logFile << "senderId,distance_sr,predicted_error,propagation_error,detectedMalicious\n";
+            isWritten = true;
+        }
+    }
+    else if (stage == 1) {
+        // Initializing members that requires initialized other modules goes here
     }
 }
 
@@ -71,6 +83,8 @@ int MyVeinsApp::extractNumericIdFromSId(const std::string& sid)
 
 void MyVeinsApp::populateWSM(BaseFrame1609_4* wsm, LAddress::L2Type rcvId, int serial)
 {
+    DemoBaseApplLayer::populateWSM(wsm, rcvId, serial);
+
     auto* bsm = dynamic_cast<DemoSafetyMessage*>(wsm);
     if (!bsm) return;
 
@@ -87,10 +101,16 @@ void MyVeinsApp::populateWSM(BaseFrame1609_4* wsm, LAddress::L2Type rcvId, int s
 
     Coord realPos = mobility->getPositionAt(simTime());
     Coord transmitPos = realPos;
-    double realSpeed = mobility->getSpeed();
+    Coord direction = mobility->getCurrentDirection();
+    double speed = mobility->getSpeed();
     double posX = realPos.x;
     double posY = realPos.y;
     const int senderId = static_cast<int>(senderVId);
+
+    Coord senderSpeed;
+    senderSpeed.x = direction.x * speed;
+    senderSpeed.y = direction.y * speed;
+    senderSpeed.z = 0;
 
     if (isAttacker) {
         switch (attackType) {
@@ -116,63 +136,11 @@ void MyVeinsApp::populateWSM(BaseFrame1609_4* wsm, LAddress::L2Type rcvId, int s
                 break;
         }
     }
-
     bsm->setSenderPos(transmitPos);
     bsm->setSenderSpeed(senderSpeed);
     bsm->setTimestamp(simTime());
 }
 
-void MyVeinsApp::onBSM(DemoSafetyMessage* bsm)
-{
-    const std::string senderSId = bsm->getSenderId();
-    const int senderId = extractNumericIdFromSId(senderSId);
-    if (senderId < 0) return;
-
-    Coord senderPos = bsm->getSenderPos();
-    Coord senderSpeed = bsm->getSenderSpeed();
-    simtime_t t1 = bsm->getTimestamp();
-    simtime_t t = simTime();
-    Coord receiverPos = mobility->getPositionAt(simTime());
-
-    // ============================
-    // STEP 1: Propagation Validation
-    // ============================
-    double propagationError = computePropagationError(senderPos, receiverPos, t - t1);
-
-    // ============================
-    // STEP 2: Motion Prediction
-    // ============================
-    double predictionError = 0.0;
-    if (lastBeacon.find(senderId) != lastBeacon.end()) {
-        Coord predicted = computePredictedPosition(
-            lastBeacon[senderId].position,
-            lastBeacon[senderId].speed
-        );
-        predictionError = computeDistance(predicted, senderPos);
-    }
-
-    // Detect suspicious
-    bool detectedMalicious = (propagationError > propagationThreshold) ||
-                             (predictionError > positionThreshold);
-
-    // Log for ML phase
-    logFile << senderId << ","
-            << computeDistance(senderPos, receiverPos) << ","
-            << predictionError << ","
-            << propagationError << ","
-            << detectedMalicious << "\n";
-
-    // Store last beacon for next prediction
-    BeaconInfo info;
-    info.position = senderPos;
-    info.speed = senderSpeed;
-    info.timestamp = t1;
-    lastBeacon[senderId] = info;
-}
-
-// ============================
-// Helper functions
-// ============================
 double MyVeinsApp::computeDistance(Coord a, Coord b)
 {
     return sqrt(pow(a.x - b.x,2) + pow(a.y - b.y,2));
@@ -192,4 +160,69 @@ double MyVeinsApp::computePropagationError(Coord senderPos, Coord receiverPos, s
     double actualDistance = computeDistance(senderPos, receiverPos);
     double expectedDistance = speedOfLight * delta.dbl();
     return fabs(actualDistance - expectedDistance);
+}
+
+void MyVeinsApp::onBSM(DemoSafetyMessage* bsm)
+{
+    const std::string senderSId = bsm->getSenderId();
+    const int senderId = extractNumericIdFromSId(senderSId);
+    if (senderId < 0) return;
+
+    Coord senderPos = bsm->getSenderPos();
+    Coord senderSpeed = bsm->getSenderSpeed();
+    simtime_t t1 = bsm->getTimestamp();
+    simtime_t t = simTime();
+    Coord receiverPos = mobility->getPositionAt(simTime());
+
+    double propagationError = computePropagationError(senderPos, receiverPos, t - t1);
+
+    double predictionError = 0.0;
+    if (lastBeacon.find(senderId) != lastBeacon.end()) {
+        Coord predicted = computePredictedPosition(
+            lastBeacon[senderId].position,
+            lastBeacon[senderId].speed
+        );
+        predictionError = computeDistance(predicted, senderPos);
+    }
+
+    bool detectedMalicious = (propagationError > propagationThreshold) ||
+                             (predictionError > positionThreshold);
+
+    logFile << senderId << ","
+            << computeDistance(senderPos, receiverPos) << ","
+            << predictionError << ","
+            << propagationError << ","
+            << detectedMalicious << "\n";
+
+    BeaconInfo info;
+    info.position = senderPos;
+    info.speed = senderSpeed;
+    info.timestamp = t1;
+    lastBeacon[senderId] = info;
+}
+
+void MyVeinsApp::onWSM(BaseFrame1609_4* wsm)
+{
+    // Your application has received a data message from another car or RSU
+    // code for handling the message goes here, see TraciDemo11p.cc for examples
+}
+
+void MyVeinsApp::onWSA(DemoServiceAdvertisment* wsa)
+{
+    // Your application has received a service advertisement from another car or RSU
+    // code for handling the message goes here, see TraciDemo11p.cc for examples
+}
+
+void MyVeinsApp::handleSelfMsg(cMessage* msg)
+{
+    DemoBaseApplLayer::handleSelfMsg(msg);
+    // this method is for self messages (mostly timers)
+    // it is important to call the DemoBaseApplLayer function for BSM and WSM transmission
+}
+
+void MyVeinsApp::handlePositionUpdate(cObject* obj)
+{
+    DemoBaseApplLayer::handlePositionUpdate(obj);
+    // the vehicle has moved. Code that reacts to new positions goes here.
+    // member variables such as currentPosition and currentSpeed are updated in the parent class
 }
