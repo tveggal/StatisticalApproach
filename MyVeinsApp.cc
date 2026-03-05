@@ -1,3 +1,25 @@
+//
+// Copyright (C) 2016 David Eckhoff <david.eckhoff@fau.de>
+//
+// Documentation for these modules is at http://veins.car2x.org/
+
+// SPDX-License-Identifier: GPL-2.0-or-later
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation; either version 2 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program; if not, write to the Free Software
+// Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+//
+
 #include "MyVeinsApp.h"
 #include <cmath>
 
@@ -5,7 +27,7 @@ Define_Module(MyVeinsApp);
 
 void MyVeinsApp::initialize(int stage)
 {
-    BaseWaveApplLayer::initialize(stage);
+    DemoBaseApplLayer::initialize(stage);
 
     if (stage == 0) {
         // Attack assignment
@@ -30,20 +52,50 @@ void MyVeinsApp::finish()
     if (logFile.is_open()) {
         logFile.close();
     }
-    BaseWaveApplLayer::finish();
+    DemoBaseApplLayer::finish();
 }
 
-void MyVeinsApp::populateWSM(BaseFrame1609_4* wsm)
+int MyVeinsApp::extractNumericIdFromSId(const std::string& sid)
 {
-    Coord realPos = mobility->getCurrentPosition();
-    Coord speed = mobility->getCurrentSpeed();
+    size_t pos = sid.find_last_of('.');
+    if (pos == std::string::npos || pos + 1 >= sid.size())
+        return -1;
 
+    try {
+        return std::stoi(sid.substr(pos + 1));
+    }
+    catch (...) {
+        return -1;
+    }
+}
+
+void MyVeinsApp::populateWSM(BaseFrame1609_4* wsm, LAddress::L2Type rcvId, int serial)
+{
+    auto* bsm = dynamic_cast<DemoSafetyMessage*>(wsm);
+    if (!bsm) return;
+
+    if (auto* mob = veins::TraCIMobilityAccess().get(getParentModule())) {
+        bsm->setSenderId(mob->getExternalId().c_str());
+    }
+    else {
+        bsm->setSenderId("");
+    }
+
+    const std::string senderSId = bsm->getSenderId();
+    const int senderVId = extractNumericIdFromSId(senderSId);
+    if (senderVId < 0) return;
+
+    Coord realPos = mobility->getPositionAt(simTime());
     Coord transmitPos = realPos;
+    double realSpeed = mobility->getSpeed();
+    double posX = realPos.x;
+    double posY = realPos.y;
+    const int senderId = static_cast<int>(senderVId);
 
     if (isAttacker) {
         switch (attackType) {
             case 1: // constant position
-                transmitPos = Coord(1000, 1000, 0); 
+                transmitPos = Coord(1000, 1000, 0);
                 break;
             case 2: // constant offset
                 transmitPos.x += falseOffset;
@@ -59,25 +111,28 @@ void MyVeinsApp::populateWSM(BaseFrame1609_4* wsm)
                 break;
             case 5: // eventual stop
                 if (simTime() > 10) { // starts attack after 10s
-                    transmitPos = lastBeacon[wsm->getSenderAddress()].position;
+                    transmitPos = lastBeacon[senderId].position;
                 }
                 break;
         }
     }
 
-    wsm->setSenderPos(transmitPos);
-    wsm->setSenderSpeed(speed);
-    wsm->setTimestamp(simTime());
+    bsm->setSenderPos(transmitPos);
+    bsm->setSenderSpeed(senderSpeed);
+    bsm->setTimestamp(simTime());
 }
 
-void MyVeinsApp::onWSM(BaseFrame1609_4* wsm)
+void MyVeinsApp::onBSM(DemoSafetyMessage* bsm)
 {
-    int senderId = wsm->getSenderAddress();
-    Coord senderPos = wsm->getSenderPos();
-    Coord senderSpeed = wsm->getSenderSpeed();
-    simtime_t t1 = wsm->getTimestamp();
+    const std::string senderSId = bsm->getSenderId();
+    const int senderId = extractNumericIdFromSId(senderSId);
+    if (senderId < 0) return;
+
+    Coord senderPos = bsm->getSenderPos();
+    Coord senderSpeed = bsm->getSenderSpeed();
+    simtime_t t1 = bsm->getTimestamp();
     simtime_t t = simTime();
-    Coord receiverPos = mobility->getCurrentPosition();
+    Coord receiverPos = mobility->getPositionAt(simTime());
 
     // ============================
     // STEP 1: Propagation Validation
@@ -97,7 +152,7 @@ void MyVeinsApp::onWSM(BaseFrame1609_4* wsm)
     }
 
     // Detect suspicious
-    bool detectedMalicious = (propagationError > propagationThreshold) || 
+    bool detectedMalicious = (propagationError > propagationThreshold) ||
                              (predictionError > positionThreshold);
 
     // Log for ML phase
