@@ -34,9 +34,10 @@ void MyVeinsApp::initialize(int stage)
 
     if (stage == 0)
     {
-        isAttacker = uniform(0, 1) < 0.10;
-        attackType = intuniform(1,5);
         mobility = TraCIMobilityAccess().get(getParentModule());
+        // 10% malicious
+        isAttacker = uniform(0, 1) < 0.15;
+        attackType = intuniform(1,5);
 
         falseOffset = 500;
 
@@ -130,7 +131,7 @@ void MyVeinsApp::populateWSM(BaseFrame1609_4* wsm, LAddress::L2Type rcvId, int s
                 transmitPos.y += uniform(-falseOffset, falseOffset);
                 break;
             case 5: // eventual stop
-                if (simTime() > 10) { // starts attack after 10s
+                if (simTime() > 10 && lastBeacon.count(senderId)) { // starts attack after 10s
                     transmitPos = lastBeacon[senderId].position;
                 }
                 break;
@@ -180,8 +181,7 @@ void MyVeinsApp::onBSM(DemoSafetyMessage* bsm)
     if (lastBeacon.find(senderId) != lastBeacon.end()) {
         Coord predicted = computePredictedPosition(
             lastBeacon[senderId].position,
-            lastBeacon[senderId].speed
-        );
+            lastBeacon[senderId].speed);
         predictionError = computeDistance(predicted, senderPos);
     }
 
